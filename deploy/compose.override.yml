@@ -1,0 +1,55 @@
+# Merge after deploy/compose.yml; paths resolve against deploy/.
+name: interviewjudge
+x-private-logging: &private-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+services:
+  mysql:
+    volumes:
+      - ./init-reliability.sh:/docker-entrypoint-initdb.d/20-reliability.sh:ro
+  gateway-service:
+    image: interviewjudge-gateway:local
+    logging: *private-logging
+  user-service:
+    image: interviewjudge-user:local
+    logging: *private-logging
+  problem-service:
+    image: interviewjudge-problem:local
+    logging: *private-logging
+    environment:
+      DOJ_INTERNAL_TOKEN: ${DOJ_INTERNAL_TOKEN:?Use an ignored private env file}
+  sandbox-service:
+    image: interviewjudge-sandbox:local
+    logging: *private-logging
+    environment:
+      DOJ_INTERNAL_TOKEN: ${DOJ_INTERNAL_TOKEN:?Use an ignored private env file}
+      HOST_CODE_PATH: ${HOST_CODE_PATH:-/var/lib/docker/volumes/interviewjudge-codes/_data}
+      HOST_PROBLEM_CODE_PATH: ${HOST_PROBLEM_CODE_PATH:-/var/lib/docker/volumes/interviewjudge-problem-codes/_data}
+  submission-service:
+    image: interviewjudge-submission:local
+    logging: *private-logging
+    environment:
+      SPRING_REDIS_HOST: redis
+      DOJ_INTERNAL_TOKEN: ${DOJ_INTERNAL_TOKEN:?Use an ignored private env file}
+      DOJ_REVIEW_PROVIDER: ${DOJ_REVIEW_PROVIDER:-mock}
+      DOJ_REVIEW_BASE_URL: ${DOJ_REVIEW_BASE_URL:-}
+      DOJ_REVIEW_MODEL: ${DOJ_REVIEW_MODEL:-}
+      DOJ_REVIEW_API_KEY: ${OPENAI_API_KEY:-}
+      DOJ_REVIEW_TIMEOUT_MS: "10000"
+      DOJ_REVIEW_MAX_OUTPUT_TOKENS: "400"
+volumes:
+  mysql-data:
+    name: interviewjudge-mysql
+  elasticsearch-data:
+    name: interviewjudge-elasticsearch
+  resource-files:
+    name: interviewjudge-files
+  codes:
+    name: interviewjudge-codes
+  problem-codes:
+    name: interviewjudge-problem-codes
+networks:
+  doj:
+    name: interviewjudge-doj

@@ -1,0 +1,15 @@
+spring:
+    application:
+        name: submission-service
+    profiles:
+        active: dev, common
+    cloud:
+        nacos:
+            server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+            config:
+                file-extension: yaml
+                shared-configs:
+                    - dataId: shared-jdbc.yaml
+                    - dataId: shared-swagger.yaml
+                    - dataId: shared-jwt.yaml
+                    - dataId: shared-rabbitmq.yaml

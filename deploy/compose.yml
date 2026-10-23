@@ -1,0 +1,204 @@
+name: interviewjudge
+
+x-service-environment: &service-environment
+  NACOS_SERVER_ADDR: nacos:8848
+  SPRING_CLOUD_NACOS_CONFIG_ENABLED: "false"
+  SPRING_CLOUD_SENTINEL_ENABLED: "false"
+  DOJ_JWT_LOCATION: classpath:doj.jks
+  DOJ_JWT_ALIAS: decade
+  DOJ_JWT_PASSWORD: doj123
+  DOJ_JWT_AUTHORIZATION: authorization
+  DOJ_JWT_SECRET_KEY: uid
+  DOJ_MQ_HOST: rabbitmq
+  SPRING_RABBITMQ_HOST: rabbitmq
+  SPRING_RABBITMQ_USERNAME: guest
+  SPRING_RABBITMQ_PASSWORD: guest
+
+x-database-environment: &database-environment
+  DOJ_DB_HOST: mysql
+  DOJ_DB_USER: root
+  DOJ_DB_PWD: baseline-only
+  SPRING_DATASOURCE_USERNAME: root
+  SPRING_DATASOURCE_PASSWORD: baseline-only
+
+services:
+  mysql:
+    image: mysql:8.0.36
+    environment:
+      MYSQL_ROOT_PASSWORD: baseline-only
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
+      - ../upstream/D-OnlineJudge/docs/SQL:/init-sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping --silent -h 127.0.0.1 -uroot -pbaseline-only"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks: [doj]
+
+  redis:
+    image: redis:7.2.5-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [doj]
+
+  rabbitmq:
+    image: rabbitmq:3.13.7-management
+    healthcheck:
+      test: ["CMD", "gosu", "rabbitmq", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks: [doj]
+
+  nacos:
+    image: nacos/nacos-server:v2.5.1-slim
+    environment:
+      MODE: standalone
+      NACOS_AUTH_ENABLE: "false"
+      JVM_XMS: 256m
+      JVM_XMX: 256m
+      JVM_XMN: 128m
+      JAVA_TOOL_OPTIONS: -XX:-UseContainerSupport
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8848/nacos/v1/console/health/readiness >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    networks: [doj]
+
+  elasticsearch:
+    image: interviewjudge-elasticsearch-ik:7.17.6
+    build:
+      context: .
+      dockerfile: Dockerfile.elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.ml.enabled: "false"
+      xpack.watcher.enabled: "false"
+      xpack.license.self_generated.type: basic
+      ES_JAVA_OPTS: -Xms512m -Xmx512m -XX:-UseContainerSupport
+      JDK_JAVA_OPTIONS: -XX:-UseContainerSupport
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 40s
+    networks: [doj]
+
+  user-service:
+    image: interviewjudge-user-service:local
+    build:
+      context: ../upstream/D-OnlineJudge
+      dockerfile: DOJ-BE/user-service/Dockerfile
+    environment:
+      <<: [*service-environment, *database-environment]
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/doj_user?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+      DOJ_REDIS_HOST: redis
+      SPRING_REDIS_HOST: redis
+    volumes:
+      - resource-files:/app/static/files
+    depends_on:
+      mysql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+      nacos: {condition: service_healthy}
+    networks: [doj]
+
+  problem-service:
+    image: interviewjudge-problem-service:local
+    build:
+      context: ../upstream/D-OnlineJudge
+      dockerfile: DOJ-BE/problem-service/Dockerfile
+    environment:
+      <<: [*service-environment, *database-environment]
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/doj_problem?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+      DOJ_REDIS_HOST: redis
+      SPRING_REDIS_HOST: redis
+      ELASTICSEARCH_URIS: http://elasticsearch:9200
+    depends_on:
+      mysql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+      nacos: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+    networks: [doj]
+
+  submission-service:
+    image: interviewjudge-submission-service:local
+    build:
+      context: ../upstream/D-OnlineJudge
+      dockerfile: DOJ-BE/submission-service/Dockerfile
+    environment:
+      <<: [*service-environment, *database-environment]
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/doj_submission?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    depends_on:
+      mysql: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+      nacos: {condition: service_healthy}
+    networks: [doj]
+
+  sandbox-service:
+    image: interviewjudge-sandbox-service:local
+    build:
+      context: ../upstream/D-OnlineJudge
+      dockerfile: DOJ-BE/sandbox-service/Dockerfile
+    environment:
+      <<: *service-environment
+      DOJ_REDIS_HOST: redis
+      SPRING_REDIS_HOST: redis
+      DOJ_RESOURCE_LOCATION: /app/static/files/
+      DOJ_CODE_PATH: /app/static/codes/
+      DOJ_PROBLEM_CODE_PATH: /app/static/problem-codes/
+      HOST_CODE_PATH: /var/lib/docker/volumes/interviewjudge-codes/_data
+      HOST_PROBLEM_CODE_PATH: /var/lib/docker/volumes/interviewjudge-problem-codes/_data
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - resource-files:/app/static/files
+      - codes:/app/static/codes
+      - problem-codes:/app/static/problem-codes
+    depends_on:
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+      nacos: {condition: service_healthy}
+    networks: [doj]
+
+  gateway-service:
+    image: interviewjudge-gateway-service:local
+    build:
+      context: ../upstream/D-OnlineJudge
+      dockerfile: DOJ-BE/gateway-service/Dockerfile
+    environment:
+      <<: *service-environment
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      nacos: {condition: service_healthy}
+    networks: [doj]
+
+volumes:
+  mysql-data:
+    name: interviewjudge-mysql
+  elasticsearch-data:
+    name: interviewjudge-elasticsearch
+  resource-files:
+    name: interviewjudge-files
+  codes:
+    name: interviewjudge-codes
+  problem-codes:
+    name: interviewjudge-problem-codes
+
+networks:
+  doj:
+    name: interviewjudge-doj

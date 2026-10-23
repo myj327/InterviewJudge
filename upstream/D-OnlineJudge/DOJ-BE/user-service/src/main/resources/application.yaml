@@ -1,0 +1,22 @@
+server:
+    port: ${doj.port.user-service}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+
+doj:
+    db:
+        host: ${DOJ_DB_HOST:127.0.0.1}
+        name: doj_user
+        user: ${DOJ_DB_USER:root}
+        pwd: ${DOJ_DB_PWD:123}
+    mq:
+        host: ${DOJ_MQ_HOST:127.0.0.1}
+    redis:
+        host: ${DOJ_REDIS_HOST:127.0.0.1}
+    swagger:
+        title: 用户服务接口文档
+        scan: com.decade.doj.user.controller

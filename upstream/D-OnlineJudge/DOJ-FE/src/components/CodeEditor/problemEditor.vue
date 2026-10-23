@@ -1,0 +1,544 @@
+<template>
+    <div class="editor">
+        <div class="main">
+            <codemirror v-model="code" :style="{
+                width: config.width,
+                height: config.height,
+                backgroundColor: 'var(--bg-primary)',
+                color: 'var(--text-primary)',
+                fontSize: fontSizeStr,
+            }" placeholder="Please enter the code." :extensions="extensions" :disabled="config.disabled"
+                :indent-with-tab="true" :tab-size="config.tabSize" @update="handleStateUpdate" @ready="handleReady" />
+        </div>
+        <div class="divider"></div>
+        <div class="footer">
+            <div class="buttons">
+                <el-button :icon="VideoPlay" round :disabled="config.disabled || config.submissionLocked" @click="handleSubmit">run</el-button>
+                <el-button :icon="VideoPlay" type="primary" round :loading="submission.busy"
+                    :disabled="submission.busy || config.submissionLocked || (config.disabled && !submission.pending?.attemptId)" @click="handleSubmit1(false, $event)"
+                    @keydown="blockRepeatedKey"
+                    >{{ submission.pending?.attemptId ? '重试提交' : '提交' }}</el-button>
+                <el-button v-if="submission.pending?.attemptId" round :disabled="submission.busy || config.submissionLocked"
+                    @click="handleSubmit1(true, $event)">重试上次提交</el-button>
+            </div>
+            <div class="infos">
+                <span class="item">Spaces: {{ config.tabSize }}</span>
+                <span class="item">Length: {{ state.length }}</span>
+                <span class="item">Lines: {{ state.lines }}</span>
+                <span class="item">Cursor: {{ state.cursor }}</span>
+                <span class="item">Selected: {{ state.selected }}</span>
+            </div>
+        </div>
+
+        <p role="status" aria-live="polite" class="submission-feedback">
+            <template v-if="config.submissionLocked">正在处理交卷，提交和重试暂时暂停。</template>
+            <template v-else-if="submission.busy">正在发送提交，请稍候。</template>
+            <template v-else-if="submission.pending?.attemptId">受理结果未确认。再次提交会重试原代码；收到提交编号后才可提交编辑后的代码。</template>
+            <template v-else-if="submission.submissionId">提交 #{{ submission.submissionId }} 已受理，判题异步进行。</template>
+        </p>
+
+        <!-- 仅在 outputVisible 为 true 时显示 output 区域 -->
+        <div class="input-section">
+            <div class="input-field">
+                <label>输入</label>
+                <el-input v-model="inputContent" :autosize="{ minRows: 1, maxRows: 10 }" type="textarea" />
+            </div>
+        </div>
+        <div class="output" v-if="outputVisible">
+            <div class="output-header">
+                <span>代码运行状态：</span>
+                <span :class="output?.exitValue !== 0 && output?.exitValue !== 10 ? 'error-text' : 'success-text'">
+                    {{ output?.status }}
+                    <el-icon v-if="output?.status === 'Running'" v-loading="loading" :element-loading-svg="svg"
+                        class="custom-loading-svg" element-loading-svg-view-box="-10, -10, 50, 50">
+                    </el-icon>
+                </span>
+                <div class="running-status" v-show="output?.exitValue === 0">
+                    <span>{{ timeInfo }}</span>
+                </div>
+                <div class="running-status" v-show="output?.exitValue === 0">
+                    <span>{{ memoryInfo }}</span>
+                </div>
+                <span class="closeoutput" @click="outputVisible = false">
+                    <el-icon>
+                        <Close />
+                    </el-icon>
+                </span>
+            </div>
+            <!-- 输入输出部分 -->
+            <div class="input-output-section" v-show="outputTextVis">
+                <div class="output-field">
+                    <label>输出</label>
+                    <pre class="output-content">{{ output?.message }}</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+</template>
+
+<script lang="ts" setup>
+import { reactive, shallowRef, computed, watch, onMounted, ref } from 'vue'
+import { EditorView, ViewUpdate } from '@codemirror/view'
+import { Codemirror } from 'vue-codemirror'
+import { ElButton, ElMessage, ElMessageBox } from 'element-plus'
+import { Close, VideoPlay } from '@element-plus/icons-vue'
+import { configType } from './index.vue'
+import { useRoute } from 'vue-router'
+import { reqProblemSubmit, reqProblemValidate, reqAttemptValidate } from '@/api/submit'
+import { executeMessage } from '@/api/submit/type'
+import { useWebSocket } from '@/utils/websocket'
+import type { SubmissionSession } from '@/utils/submissionSession'
+
+const props = defineProps<{
+    config: configType,
+    code: string,
+    theme: Object | Array<string>,
+    language: Function,
+    languageName: string,
+    submission: SubmissionSession
+}>();
+
+const route = useRoute();
+
+// 组件暴露
+defineExpose({
+    Codemirror
+});
+
+// 响应式状态
+const code = shallowRef(props.code);
+const cmView = shallowRef<EditorView>();
+const inputModel = shallowRef(true);  // 控制输入区域显示与否
+const output = shallowRef<executeMessage>();  // 保存输出结果
+const outputVisible = shallowRef(false);  // 控制 output 区域显示与否
+const outputTextVis = shallowRef(false);  // 控制输入输出区域显示与否
+const inputContent = ref(''); // 用于存储输入内容
+
+const fontSizeStr = computed(() => `${props.config.fontSize}px`);
+const timeInfo = computed(() => {
+    return output.value?.time ? `${(output.value.time * 1000).toFixed(2)} ms` : '0.00 ms';
+});
+const memoryInfo = computed(() => {
+    return output.value?.memory ? `${(output.value.memory).toFixed(2)} KB` : '0.00 KB';
+});
+
+const loading = ref(true);
+const svg = `
+        <path class="path" d="
+          M 30 15
+          L 28 17
+          M 25.61 25.61
+          A 15 15, 0, 0, 1, 15 30
+          A 15 15, 0, 1, 1, 27.99 7.5
+          L 15 15
+        " style="stroke-width: 4px; fill: #F9F9F9"/>
+      `
+
+// 计算属性
+const extensions = computed(() => {
+    const result = [];
+    if (props.language) {
+        result.push(props.language());
+    }
+    if (props.theme) {
+        result.push(props.theme);
+    }
+    return result;
+});
+
+const handleReady = ({ view }: any) => {
+    cmView.value = view;
+};
+
+const state = reactive({
+    lines: null as null | number,
+    cursor: null as null | number,
+    selected: null as null | number,
+    length: null as null | number
+});
+
+const handleStateUpdate = (viewUpdate: ViewUpdate) => {
+    const ranges = viewUpdate.state.selection.ranges
+    state.selected = ranges.reduce((plus, range) => plus + range.to - range.from, 0)
+    state.cursor = ranges[0].anchor
+    state.length = viewUpdate.state.doc.length
+    state.lines = viewUpdate.state.doc.lines
+};
+
+const handleSubmit1 = async (retry = false, event?: MouseEvent) => {
+    if (props.config.submissionLocked || props.submission.busy || (event && event.detail > 1)
+        || (props.config.disabled && !props.submission.pending?.attemptId)) return;
+    const attemptId = route.query.attemptId;
+    if (attemptId !== undefined && (typeof attemptId !== 'string' || !/^[1-9]\d*$/.test(attemptId))) {
+        ElMessage.error('考核链接无效');
+        return;
+    }
+    try {
+        const sid = await props.submission.send({ code: code.value, language: props.languageName,
+            pid: route.params.id as string, attemptId }, retry, async snapshot => {
+            const form = new FormData();
+            form.append('file', new Blob([snapshot.code], { type: 'text/plain' }), `Main.${getLanguageExtension(snapshot.language)}`);
+            form.append('language', snapshot.language);
+            if (snapshot.attemptId) {
+                form.append('idempotencyKey', snapshot.idempotencyKey!);
+                return (await reqAttemptValidate(snapshot.attemptId, form)).data;
+            }
+            form.append('pid', snapshot.pid);
+            return (await reqProblemValidate(form)).data;
+        });
+        if (sid === undefined) return;
+        ElMessage.info(`提交 #${sid} 已受理，判题中...`);
+        useWebSocket().subscribeToSubmission(sid);
+    } catch (err) {
+        ElMessage.error(err instanceof Error ? err.message : '提交请求失败');
+    }
+};
+
+const blockRepeatedKey = (event: KeyboardEvent) => {
+    if (event.repeat && ['Enter', ' '].includes(event.key)) event.preventDefault();
+};
+
+const handleSubmit = async () => {
+    if (props.config.disabled || props.config.submissionLocked) return;
+
+    outputTextVis.value = false;
+
+    output.value = {
+        exitValue: -1, // 设置为 null 表示还没有结果
+        status: 'Running',
+        message: '',
+        time: 0,
+        memory: 0,
+    };
+
+    // 将代码字符串转换为 Blob 文件
+    const codeBlob = new Blob([code.value], { type: 'text/plain' });
+    const inputBlob = new Blob([inputContent.value], { type: 'text/plain' });
+
+    // 获取语言扩展名
+    const languageExtension = getLanguageExtension(props.languageName);
+    const formData = new FormData();
+    const pid = route.params.id as string;
+    formData.append('pid', pid);
+    formData.append('file', codeBlob, `Main.${languageExtension}`);
+    formData.append('input', inputBlob, `${pid}_input.txt`);
+    formData.append('language', props.languageName);
+
+    ElMessage.success('提交成功');
+
+    // 发送请求
+    const response = (await reqProblemSubmit(formData)).data;
+
+    // 成功时处理
+    if (response.code === 200) {
+        const data = response.data;
+        if (data.exitValue === 0 || data.exitValue >= 10) {
+            output.value = data;
+        } else {
+            output.value = data;
+        }
+        if (data.message.trim() !== '') {
+            outputTextVis.value = true;
+        } else {
+            outputTextVis.value = false;
+        }
+    }
+    // 显示 output 区域
+    outputVisible.value = true;
+};
+
+// 获取语言扩展名的辅助函数
+const getLanguageExtension = (languageName: string) => {
+    if (!languageName) return 'txt'; // 默认 txt 后缀
+
+    // 你可以根据不同语言函数推断其扩展名
+    const language = languageName.toLowerCase();
+
+    switch (language) {
+        case 'javascript': return 'js';
+        case 'python': return 'py';
+        case 'cpp': return 'cpp';
+        case 'java': return 'java';
+        // 添加更多语言映射
+        default: return 'txt';
+    }
+};
+
+// 监听 props 变化
+onMounted(() => {
+    watch(
+        () => props.code,
+        (_code) => {
+            code.value = _code
+        }
+    );
+    const handleKeyDown = (event: KeyboardEvent) => {
+        const isSaveShortcut =
+            (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's';
+
+        if (isSaveShortcut) {
+            event.preventDefault(); // 阻止默认保存行为
+            console.log('Save shortcut (Ctrl+S / Cmd+S) is disabled in the editor.');
+            // 可选：在这里执行其他逻辑，比如保存代码等
+        }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+});
+
+// log 方法直接使用 console
+const log = console.log
+</script>
+
+<style lang="scss" scoped>
+@import '@/styles/variable.scss';
+
+.editor {
+    .submission-feedback {
+        margin: 0;
+        padding: 0.5em 1em;
+        min-height: 2em;
+        color: var(--text-secondary);
+    }
+    .divider {
+        height: 1px;
+        background-color: $border-color;
+    }
+
+    .main {
+
+        .code {
+            width: 30%;
+            height: 100px;
+            margin: 0;
+            padding: 0.4em;
+            overflow: scroll;
+            border-left: 1px solid $border-color;
+            font-family: monospace;
+        }
+    }
+
+    .footer {
+        min-height: 3rem;
+        padding: 0.5em 1em;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5em;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 90%;
+        background-color: var(--bg-elevated);
+        border-top: 1px solid var(--border-color);
+
+        .buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5em;
+            .item {
+                margin-right: 1em;
+                display: inline-flex;
+                justify-content: center;
+                align-items: center;
+                background-color: transparent;
+                border: 1px dashed var(--border-color);
+                font-size: $font-size-small;
+                color: var(--text-secondary);
+                cursor: pointer;
+
+                .iconfont {
+                    margin-left: $xs-gap;
+                }
+
+                &:hover {
+                    color: var(--text-primary);
+                    border-color: var(--text-primary);
+                }
+            }
+
+            :deep(.el-button) {
+                background: var(--bg-primary);
+                border-color: var(--border-color);
+                color: var(--text-primary);
+                
+                &:hover, &:focus {
+                    background: var(--primary-start);
+                    border-color: var(--primary-start);
+                    color: #fff;
+                }
+                
+                &.el-button--primary {
+                    background: var(--primary-gradient);
+                    border: none;
+                    color: #fff;
+                    
+                    &:hover {
+                        opacity: 0.9;
+                    }
+                }
+            }
+        }
+
+        .infos {
+            color: var(--text-secondary);
+            .item {
+                margin-left: 2em;
+                display: inline-block;
+                font-feature-settings: 'tnum';
+            }
+        }
+    }
+
+    .output {
+        margin-top: 20px;
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        padding: 20px;
+        background-color: var(--bg-elevated);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+
+        .output-header {
+            display: flex;
+            justify-content: flex-start;
+            //margin-bottom: 10px;
+            color: var(--text-primary);
+
+            .closeoutput {
+                margin-left: auto;
+                cursor: pointer;
+            }
+
+            .running-status {
+                background-color: var(--bg-primary);
+                border: 1px solid var(--border-color);
+                border-radius: 4px;
+                margin-left: 10px;
+                padding: 0 10px;
+
+                span {
+                    color: var(--danger);
+                    font-size: 16px;
+                }
+            }
+
+            .custom-loading-svg {
+                background-color: transparent;
+                /* 设置背景为透明 */
+                border: none;
+                /* 清除边框 */
+                padding: 0;
+                /* 去掉内边距 */
+            }
+
+            span {
+                font-size: 18px;
+                font-weight: bold;
+            }
+
+            /* 根据状态动态改变颜色 */
+            .error-text {
+                color: var(--danger);
+                /* 红色表示错误 */
+            }
+
+            .success-text {
+                color: var(--success);
+                /* 绿色表示成功 */
+            }
+        }
+
+        .input-output-section {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 15px;
+
+            .input-field,
+            .output-field {
+                display: flex;
+                flex-direction: column;
+            }
+
+            label {
+                font-size: 14px;
+                margin-bottom: 5px;
+                font-weight: bold;
+                color: var(--text-secondary);
+            }
+
+            .input-content {
+                background-color: var(--bg-primary);
+                border: 1px solid var(--border-color);
+                border-radius: 4px;
+                padding: 10px;
+                font-size: 14px;
+                color: var(--text-primary);
+                line-height: 1.5;
+            }
+
+            .output-content {
+                background-color: var(--bg-primary);
+                border: 1px solid var(--border-color);
+                border-radius: 4px;
+                padding: 10px;
+                font-size: 14px;
+                color: var(--text-primary);
+                line-height: 1.5;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }
+        }
+    }
+
+    .input-section {
+        margin-top: 20px;
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        padding: 20px;
+        background-color: var(--bg-elevated);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+
+        .input-field {
+            display: flex;
+            flex-direction: column;
+        }
+
+        label {
+            font-size: 14px;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: var(--text-secondary);
+        }
+
+        .input-content {
+            background-color: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 10px;
+            font-size: 14px;
+            color: var(--text-primary);
+            line-height: 1.5;
+            min-height: 50px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            outline: none;
+
+            &:focus {
+                border-color: var(--primary-start);
+                box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+            }
+        }
+
+        :deep(.el-textarea__inner) {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            border-color: var(--border-color);
+            box-shadow: none;
+            
+            &:focus {
+                border-color: var(--primary-start);
+                box-shadow: 0 0 0 1px var(--primary-start);
+            }
+        }
+    }
+}
+</style>

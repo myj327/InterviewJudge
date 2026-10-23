@@ -1,0 +1,28 @@
+server:
+    port: ${doj.port.submission-service}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+
+doj:
+    db:
+        host: ${DOJ_DB_HOST:127.0.0.1}
+        name: doj_submission
+        user: ${DOJ_DB_USER:root}
+        pwd: ${DOJ_DB_PWD:123}
+    mq:
+        host: ${DOJ_MQ_HOST:127.0.0.1}
+    swagger:
+        title: 沙箱接口文档
+        scan: com.decade.doj.submission.controller
+    review:
+        provider: ${DOJ_REVIEW_PROVIDER:mock}
+        openai-compatible:
+            base-url: ${DOJ_REVIEW_BASE_URL:}
+            model: ${DOJ_REVIEW_MODEL:}
+            timeout-ms: ${DOJ_REVIEW_TIMEOUT_MS:10000}
+            max-output-tokens: ${DOJ_REVIEW_MAX_OUTPUT_TOKENS:400}
+            api-key: ${DOJ_REVIEW_API_KEY:${OPENAI_API_KEY:}}

@@ -1,0 +1,5 @@
+FROM elasticsearch:7.17.6
+
+# This exact URL and version come from the fixed upstream deployment guide.
+RUN bin/elasticsearch-plugin install --batch \
+    https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-7.17.6.zip

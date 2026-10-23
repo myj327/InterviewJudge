@@ -1,0 +1,32 @@
+**/target/
+**/node_modules/
+**/dist/
+
+.env
+.env.local
+*.tar.gz
+
+evidence/baseline/.last-run
+.DS_Store
+Thumbs.db
+
+# Local secrets and generated validation artifacts
+.env.*
+!.env.example
+**/__pycache__/
+*.pyc
+*.class
+evidence/**/*.args
+
+# Local development history and private presentation material
+/.tools/
+/AGENTS.md
+/codex-team/
+/evidence/
+/artifacts/
+/docs/interview/
+/docs/DEMO.md
+/docs/QUALITY_AND_METRICS.md
+/docs/RESUME_CLAIMS.md
+/InterviewJudge_AI_项目面试报告.docx
+*.log

@@ -1,0 +1,3 @@
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+  com.decade.doj.common.config.global.CommonExceptionConfig,\
+  com.decade.doj.common.mq.ReliableRabbitConfiguration
